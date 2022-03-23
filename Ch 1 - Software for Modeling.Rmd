@@ -1,0 +1,42 @@
+---
+title: "Chapter 1: Software for modeling"
+output: html_notebook
+---
+
+# Types of Models
+
+Most models fall into at least one of these categories:
+
+## Descriptive Models
+
+The purpose of a descriptive model is to describe or illustrate characteristics of some data. The analysis might have no other purpose than to visually emphasize some trend in the data.
+
+## Inferential Models
+
+The goal of an inferential model is to produce a decision for a research question or to test a specific hypothesis, in much they way that statistical tests are used.
+
+## Predictive Models
+
+The primary goal with these models is to predict values that have the highest possible fidelity to the true value of the new data.
+
+# Some Terminology
+
+Many models can be categorized as being *supervised* or *unsupervised*. Unsupervised models are those that learn patterns, clusters, or other characteristics of the data but lack an outcome. Supervised model as those that have an outcome variable.
+
+Within supervised models, there are two main sub-categories:
+
+-   Regression predicts a numeric outcome
+
+-   Classification predicts an outcome that is an ordered or unordered set of qualitative values
+
+# How Does Modeling Fit Into the Data Analysis Process?
+
+The general phases are:
+
+-   Exploratory data analysis
+
+-   Feature engineering: creating specific model terms
+
+-   Model tuning and selection: compare the performance of multiple models. Some models require parameter tuning
+
+-   Model evaluation: assess the model's performance metrics, examine residual plots, and conduct other EDA-like analyses to understand how well the models work.

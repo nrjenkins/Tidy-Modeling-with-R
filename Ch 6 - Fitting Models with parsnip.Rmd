@@ -1,0 +1,138 @@
+---
+title: "Chapter 6: Fitting Models with **parsnip**"
+output: html_notebook
+---
+
+The **parsnip** package provides a fluent and standardized interface for a variety of models.
+
+# Create a Model
+
+For tidymodels, the approach to specifying a model is intended to be more unified:
+
+1.  **Specify the *type* of model based on its mathematical structure.**
+2.  **Specify the *engine* for fitting the model**. This is the software to use to fit the model.
+3.  **When required, declare the *mode* of the model**. The mode reflects the type of prediction outcome. For numeric outcomes, the mode is *regression*. For qualitative outcomes, the mode is *classification*.
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+linear_reg() %>% set_engine("lm")
+
+linear_reg() %>%  set_engine("glmnet")
+
+linear_reg() %>% set_engine("stan")
+```
+
+Model estimation can then be done with the `fit()` function or the `fit_xy()` function. The `translate()` function can provide details on how **parsnip** converts the user's code to the package's syntax:
+
+```{r}
+linear_reg() %>% set_engine("lm") %>% translate()
+
+linear_reg(penalty = 1) %>% set_engine("glmnet") %>% translate()
+
+linear_reg() %>% set_engine("stan") %>% translate()
+```
+
+Let's walk through how to predict the sale prices of houses in the Ames data as a function of only longitude and latitude:
+
+```{r}
+data(ames, package = "modeldata")
+
+ames <- ames %>% 
+  mutate(Sale_Price_log = log10(Sale_Price))
+
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.8, strata = Sale_Price_log)
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+
+lm_model <- 
+  linear_reg() %>% 
+  set_engine("lm")
+
+lm_form_fit <- 
+  lm_model %>% 
+  fit(Sale_Price_log ~ Longitude + Latitude, data = ames_train)
+
+lm_xy_fit <- 
+  lm_model %>% 
+  fit_xy(
+    x = ames_train %>% select(Longitude, Latitude),
+    y = ames_train %>% pull(Sale_Price_log)
+  )
+
+lm_form_fit
+
+lm_xy_fit
+```
+
+To see how **parsnip** maps arguments to the original names we can use the `translate()` function:
+
+```{r}
+rand_forest(trees = 1000, min_n = 5) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression") %>% 
+  translate()
+```
+
+Modeling functions in **parsnip** separate model arguments into two categories:
+
+-   *Main arguments* are more commonly used and tend to be available across engines
+
+-   *Engine arguments* are either specific to a particular engine or using more rarely
+
+# Using the Model Results
+
+We examine the fitted model with `extract_fit_engine()`:
+
+```{r}
+lm_form_fit %>% extract_fit_engine()
+```
+
+We can also use `summary()`:
+
+```{r}
+model_res <- 
+  lm_form_fit %>% 
+  extract_fit_engine() %>% 
+  summary()
+
+model_res
+
+param_est <- coef(model_res)
+param_est
+```
+
+```{r}
+tidy(lm_form_fit)
+```
+
+# Make Predictions
+
+Another area where **parsnip** diverges from conventional R modeling is the format of values returned from `predict()`. For prediction, **parsnip** always conforms to the following rules:
+
+1.  The results are always a tibble.
+2.  The column names of the tibble are always predictable.
+3.  There are always as many rows in the tibble as there are in the input data set.
+
+```{r}
+ames_test_small <- ames_test %>% slice(1:5)
+predict(lm_form_fit, new_data = ames_test_small)
+```
+
+There rules make it easier to merge predictions with the original data:
+
+```{r}
+ames_test_small %>% 
+  select(Sale_Price_log) %>% 
+  bind_cols(predict(lm_form_fit, ames_test_small)) %>% 
+  # add CI to the results
+  bind_cols(predict(lm_form_fit, ames_test_small, type = "pred_int"))
+```
+
+# Creating Model Specifications
+
+```{r}
+parsnip_addin()
+```

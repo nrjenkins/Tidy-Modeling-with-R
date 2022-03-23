@@ -1,0 +1,180 @@
+---
+title: "Chapter 7: A Model Workflow"
+output: html_notebook
+---
+
+```{r}
+library(tidymodels)
+data(ames)
+ames <- mutate(ames, Sale_Price = log10(Sale_Price))
+
+set.seed(123)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <-  testing(ames_split)
+
+lm_model <- linear_reg() %>% set_engine("lm")
+```
+
+The purpose of the workflow concept is to encapsulate the major pieces of the modeling process.
+
+# Where Does the Model Begin and End?
+
+There are several steps involved before we fit a model:
+
+-   What predictors to use
+
+-   How to deal with missing data
+
+-   Variable transformations
+
+After the model is fit we need to make decisions about model performance and evaluation.
+
+All of these tasks compose a **model workflow**.
+
+# Workflow Basics
+
+The **workflows** package allows users to bind modeling and preprocessing objects together.
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+lm_model <- 
+  linear_reg() %>% 
+  set_engine("lm")
+```
+
+A workflow always requires a **parsnip** model object:
+
+```{r}
+lm_workflow <- 
+  workflow() %>% 
+  add_model(lm_model)
+
+lm_workflow
+```
+
+If our model were very simple, a standard R formula can be used as a preprocessor:
+
+```{r}
+lm_workflow <- 
+  lm_workflow %>% 
+  add_formula(Sale_Price ~ Longitude + Latitude)
+
+lm_workflow
+```
+
+Workflows have a `fit()` method that can be used to create the model:
+
+```{r}
+lm_fit <- fit(lm_workflow, ames_train)
+lm_fit
+```
+
+We can also use `predict()`:
+
+```{r}
+predict(lm_fit, ames_test %>% slice(1:3))
+```
+
+# Adding Raw Variables to the `workflow()`
+
+```{r}
+lm_workflow <- 
+  lm_workflow %>% 
+  remove_formula() %>% 
+  add_variables(outcome = Sale_Price, predictors = c(Longitude, Latitude))
+
+lm_workflow
+
+fit(lm_workflow, ames_train)
+```
+
+# How Does a `workflow()` Use the Formula?
+
+## Special Formulas and In-Line Functions
+
+To fit a regression with random effects for subjects, we use:
+
+```{r}
+library(nlme)
+library(lme4)
+lmer(distance ~ Sex + (age | Subject), data = Orthodont)
+```
+
+But, the special attributes of the formula cannot be assessed with typical R methods.
+
+The solution in **workflows** is an optional supplementary model formula that can be passed to `add_model()`. For example, using the previously mentioned `strata()` function, in the **survival** package, the `add_variables()` specification provides the bare column names and the actual formula given to the model is set within `add_model()`:
+
+```{r}
+library(censored)
+
+parametric_model <- survival_reg()
+
+parametric_workflow <- 
+  workflow() %>% 
+  # pass the data along as-is:
+  add_variables(outcome = c(fustat, futime), predictors = c(age, rx)) %>% 
+  add_model(parametric_model,
+            # This formula is given to the model
+            formula = Surv(futime, fustat) ~ age + strata(rx))
+
+parametric_fit <- fit(parametric_workflow, data = ovarian)
+parametric_fit
+```
+
+# Creating Multiple Workflows at Once
+
+The **workflowset** package allows you to create combinations of workflow components which lets you fit multiple models.
+
+We we wanted to focus on the different ways that house location is represented in the Ames data. We can create a set of formulas that capture these predictors:
+
+```{r}
+location <- list(
+  longitude = Sale_Price ~ Longitude,
+  latitude = Sale_Price ~ Latitude,
+  coords = Sale_Price ~ Longitude + Latitude,
+  neighborhood = Sale_Price ~ Neighborhood
+)
+```
+
+These can be crossed with one or more models using the `workflow_set()` function.
+
+```{r}
+library(workflowsets)
+location_models <- 
+  workflow_set(preproc = location, models = list(lm = lm_model))
+location_models
+
+location_models$info[[1]]
+
+extract_workflow(location_models, id = "coords_lm")
+```
+
+Now let's create model fits for each formula and save them in a new column called `fit`.
+
+```{r}
+location_models <- 
+  location_models %>% 
+  mutate(fit = map(info, ~ fit(.x$workflow[[1]], ames_train)))
+
+location_models
+
+location_models$fit[[1]]
+```
+
+# Evaluating the Test Set
+
+Say we've concluded our model development and have settled on a final model. We can use `last_fit()` to fit the model to the entire training set and evaluate it with the testing set.
+
+```{r}
+final_lm_res <- last_fit(lm_workflow, ames_split)
+final_lm_res
+
+fitted_lm_workflow <- extract_workflow(final_lm_res)
+
+collect_metrics(final_lm_res)
+
+collect_predictions(final_lm_res) %>% slice(1:5)
+```

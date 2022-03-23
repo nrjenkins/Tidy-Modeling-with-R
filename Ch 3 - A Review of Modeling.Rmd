@@ -1,0 +1,79 @@
+---
+title: "Chapter 3: A Review of R Modeling"
+output: html_notebook
+---
+
+# An Example
+
+```{r}
+library(tidyverse)
+
+data(crickets, package = "modeldata")
+names(crickets)
+
+ggplot(crickets,
+       aes(x = temp, y = rate, color = species, pch = species, lty = species)) +
+  geom_point(size = 2) +
+  geom_smooth(method = lm, se = FALSE, alpha = 0.5) +
+  scale_color_brewer(palette = "Paired") +
+  labs(x = "Temperature (C)", y = "Chirp Rate (per minute)")
+```
+
+# Why Tidyness is Important for Modeling
+
+We can calculate the correlation between all variables in a dataset like this:
+
+```{r}
+library(tidyverse)
+corr_res <- map(mtcars %>% select(-mpg), cor.test, y = mtcars$mpg)
+corr_res[[1]]
+```
+
+We can plot all of the results like this:
+
+```{r}
+library(broom)
+
+corr_res %>% 
+  map_dfr(tidy, .id = "predictor") %>% 
+  ggplot(aes(x = fct_reorder(predictor, estimate))) +
+  geom_point(aes(y = estimate)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1)
+```
+
+# Combining Base R Models and the Tidyverse
+
+We can fit separate models to each species like this:
+
+```{r}
+split_by_spcies <- crickets %>% 
+  group_nest(species)
+split_by_spcies
+
+model_by_species <- split_by_spcies %>% 
+  mutate(model = map(data, ~ lm(rate ~ temp, data = .x)))
+model_by_species
+
+model_by_species %>% 
+  mutate(coef = map(model, tidy)) %>%
+  select(species, coef) %>% 
+  unnest(cols = c(coef))
+```
+
+Same things with for loops:
+
+```{r}
+model_by_species_alt <- vector("list", length = n_distinct(crickets$species))
+
+for (i in seq_along(model_by_species_alt)) {
+  model_by_species_alt[[i]] <- lm(rate ~ temp, data = split_by_spcies$data[[i]])
+}
+
+results <- vector("list", length = 2)
+for (i in seq_along(model_by_species_alt)) {
+  results[[i]] <- tidy(model_by_species_alt[[i]]) %>% 
+    mutate(model = paste("model", i, sep = "_"))
+}
+
+results %>% bind_rows()
+```

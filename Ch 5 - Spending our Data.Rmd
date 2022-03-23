@@ -1,0 +1,52 @@
+---
+title: "Chapter 5: Spending our Data"
+output: html_notebook
+---
+
+```{r}
+ames <- ames %>% 
+  mutate(Sale_Price_log = log10(Sale_Price))
+```
+
+# Common Methods for Splitting Data
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+set.seed(501)
+
+# save the split information for an 80/20 split of the data
+ames_split <- initial_split(ames, prop = 0.80)
+ames_split
+```
+
+To get the datasets from the `rsplit` object, we need two more functions:
+
+```{r}
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+
+dim(ames_train)
+```
+
+Random sampling doesn't work as well when there are clear groups, or clusters, in the data. For this, we need stratified sampling.
+
+```{r}
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.8, strata = Sale_Price_log)
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+```
+
+With time series data, we usually want to use the most recent data as the test set. For that, we use `initial_time_split()` which denotes what proportion of the first part of the data should be used as the training set.
+
+# What About a Validation Set?
+
+A validation set is a way to test how well the model will preform prior to the test set.
+
+# Multi-Level Data
+
+This type of data contains multiple rows per experimental unit. Data splitting should occur at the independent experimental unit level of data.
+
+# Other Considerations

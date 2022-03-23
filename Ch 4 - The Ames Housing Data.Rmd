@@ -1,0 +1,30 @@
+---
+title: "Chapter 4: The Ames Housing Data"
+output: html_notebook
+---
+
+```{r}
+data(ames, package = "modeldata")
+
+dim(ames)
+```
+
+# Exploring Important Features
+
+Let's start with the outcome we want to predict: the last sale price of the house.
+
+```{r}
+ggplot(ames, aes(x = Sale_Price)) +
+  geom_histogram(bins = 50, col = "white")
+```
+
+Let's log-transform the data:
+
+We will use the log-transformed version:
+
+```{r}
+ames <- ames %>% 
+  mutate(Sale_Price_log = log10(Sale_Price))
+```
+
+Let's visualize the spatial distribution:
