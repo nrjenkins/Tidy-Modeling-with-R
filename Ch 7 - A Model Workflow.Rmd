@@ -1,6 +1,8 @@
 ---
 title: "Chapter 7: A Model Workflow"
 output: html_notebook
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r}
