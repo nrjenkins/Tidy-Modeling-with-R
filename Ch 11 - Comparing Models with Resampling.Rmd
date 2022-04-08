@@ -1,0 +1,230 @@
+---
+title: "Chapter 11: Comparing Models with Resampling"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+library(tidymodels)
+data(ames)
+ames <- mutate(ames, Sale_Price = log10(Sale_Price))
+
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <-  testing(ames_split)
+
+ames_rec <- 
+  recipe(Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+           Latitude + Longitude, data = ames_train) %>%
+  step_log(Gr_Liv_Area, base = 10) %>% 
+  step_other(Neighborhood, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_interact( ~ Gr_Liv_Area:starts_with("Bldg_Type_") ) %>% 
+  step_ns(Latitude, Longitude, deg_free = 20)
+
+lm_model <- linear_reg() %>% set_engine("lm")
+
+lm_wflow <- 
+  workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(ames_rec)
+
+lm_fit <- fit(lm_wflow, ames_train)
+
+rf_model <- 
+  rand_forest(trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rf_wflow <- 
+  workflow() %>% 
+  add_formula(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+      Latitude + Longitude) %>% 
+  add_model(rf_model) 
+
+set.seed(1001)
+ames_folds <- vfold_cv(ames_train, v = 10)
+
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+set.seed(1003)
+rf_res <- rf_wflow %>% fit_resamples(resamples = ames_folds, control = keep_pred)
+```
+
+
+Once we create two or more models, we want to compare them. This could mean comparing the same model with different features, or comparing different models. 
+
+# Creating Multiple Models
+
+Let's create different linear models that add these preprocessing steps incrementally. We'll create three recipies then combine them into a workflow set:
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+basic_rec <- 
+  recipe(Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+           Latitude + Longitude, data = ames_train) %>%
+  step_log(Gr_Liv_Area, base = 10) %>% 
+  step_other(Neighborhood, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors())
+
+interaction_rec <- 
+  basic_rec %>% 
+  step_interact(~ Gr_Liv_Area:starts_with("Bldg_Type_")) 
+
+spline_rec <- 
+  interaction_rec %>% 
+  step_ns(Latitude, Longitude, deg_free = 50)
+
+preproc <- 
+  list(basic = basic_rec, 
+       interact = interaction_rec, 
+       splines = spline_rec)
+
+lm_models <- workflow_set(preproc, list(lm = lm_model), cross = FALSE)
+lm_models
+```
+
+Now we want to resample each of these models. To do so we use `workflow_map()` which takes an initial argument of the function to apply to the workflows, followed by options to that function. 
+
+```{r}
+lm_models <- 
+  lm_models %>% 
+  workflow_map("fit_resamples",
+               seed = 1101,verbose = TRUE,
+               resamples = ames_folds, control = keep_pred)
+lm_models
+```
+
+To look at the performance statistics:
+
+```{r}
+collect_metrics(lm_models) %>% 
+  filter(.metric == "rmse")
+```
+
+We can add in the random forest model from the last chapter like this:
+
+```{r}
+four_models <- 
+  as_workflow_set(random_forest = rf_res) %>% 
+  bind_rows(lm_models)
+four_models
+```
+
+We can plot them with the `autoplot()` function. 
+
+```{r}
+library(ggrepel)
+autoplot(four_models, metric = "rmse") +
+  geom_text_repel(aes(label = wflow_id), nudge_x = 1/8, nudge_y = 1/100)
+```
+
+# Resampled Performance Statistics
+
+Within-resample correlation for resampling statistics has to do with the fact that each model was measured with the same cross-validation folds, and the results for the same resample tend to be similar. High correlations indicate that across models there are large within-resample correlations. Ignoring the resample-to-resample effect would bias our model comparisons towards finding no differences between models. 
+
+# Simple Hypothesis Testing Methods
+
+We can use ANOVA to make model comparisions. Before testing hypotheses of differences between models, we need to account for the resampling-to-resampling effect. This could be down with a multilevel model were we treat the resample grouops as a random effect. 
+
+A simple and fast way to compare two models at a time is to use the *differences* in R-squared values as the outcome data in the ANOVA model. Since the outcomes are matched by resample, the differences do not contain the resample-to-resample effect. 
+
+```{r}
+rsq_indiv_estimates <- 
+  collect_metrics(four_models, summarize = FALSE) %>% 
+  filter(.metric == "rsq") 
+
+rsq_wider <- 
+  rsq_indiv_estimates %>% 
+  select(wflow_id, .estimate, id) %>% 
+  pivot_wider(id_cols = "id", names_from = "wflow_id", values_from = ".estimate")
+
+
+compare_lm <- 
+  rsq_wider %>% 
+  mutate(difference = splines_lm - basic_lm)
+
+lm(difference ~ 1, data = compare_lm) %>% 
+  tidy(conf.int = TRUE)
+```
+
+# Bayesian Methods
+
+To properly model the resamples, we consider the resampling group as a random intercept. The **tidyposterior** package has functions to fit Bayesian models for the purpose of comparing resampled models. The main function is called `perf_mod()` and it is configured to "just work" for different types of objects. 
+
+```{r}
+library(tidyposterior)
+library(rstanarm)
+
+rsq_anova <- 
+  perf_mod(four_models,
+           metric = "rsq",
+           prior_intercept = rstanarm::student_t(df = 1),
+           chains = 4,
+           iter = 5000,
+           seed = 1102)
+
+model_post <- 
+  rsq_anova %>% 
+  tidy(seed = 1103)
+
+glimpse(model_post)
+
+model_post %>% 
+  mutate(model = forcats::fct_inorder(model)) %>% 
+  ggplot(aes(x = posterior)) +
+  geom_histogram(bins = 50, color = "white", fill = "blue", alpha = 0.4) +
+  facet_wrap(~ model, ncol = 1)
+```
+
+These histograms describe the estimated probability distributions of the mean R-squared value for each model. 
+
+We can also plot them:
+
+```{r}
+autoplot(rsq_anova)
+```
+
+We Bayesian models, we can compare parameters by sampling from the individual posteriors and taking the difference. This can be done with the `contrast_models()` function. 
+
+```{r}
+rsq_diffs <- 
+  contrast_models(rsq_anova,
+                  list_1 = "splines_lm",
+                  list_2 = "basic_lm",
+                  seed = 1104)
+
+rsq_diffs %>% 
+  ggplot(aes(x = difference)) +
+  geom_vline(xintercept = 0, lty = 2) +
+  geom_histogram(bins = 50)
+```
+
+This shows that the model with splines had larger values. The `summary()` function computes the mean of the distribution as well as credible intervals. 
+
+```{r}
+summary(rsq_diffs)
+```
+
+The `probability` column is the proportion of the posterior that is greater than zero. This is the probability that the positive difference is real. But, the mean difference is still really close to zero. We might want to use ROPE here. We can do that with the `size` argument:
+
+```{r}
+summary(rsq_diffs, size = 0.02)
+```
+
+The `pract_equliv` column is the proportion of the posterior that is within `[-size, size]`. The large value indicates that there is an overwhelming probability that these two models are the same. 
+
+When `perf_mod()` is used with a workflow set, the `autoplot()` can show the `pract_equiv` results that compare each workflow to the current best. 
+
+```{r}
+autoplot(rsq_anova, type = "ROPE", size = 0.02)
+```
+
+## The Effect of the Amount of Resampling
+
+More resamples increases the precision of the overall resampling estimate.
