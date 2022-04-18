@@ -1,0 +1,63 @@
+---
+title: 'Chapter 14: Iterative Search'
+author: "Nick Jenkins"
+date: '2022-04-18'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidymodels)
+
+data(cells)
+cells <- cells %>% select(-case)
+
+set.seed(1304)
+cell_folds <- vfold_cv(cells)
+
+roc_res <- metric_set(roc_auc)
+```
+
+Grid search takes a pre-defined set of candidate values, evaluates them, then chooses the best settings. Iterative search methods pursue a different strategy. During the search process they predict which values to test next. 
+
+*Bayesian optimization* uses a statistical model to predict better parameter settings.
+
+# A Support Vector Machine Model
+
+The two tuning parameters to optimize are the SVM cost value and the radial basis function kernel parameter. 
+
+```{r}
+svm_recipe <- 
+  recipe(class ~ ., data = cells) %>% 
+  step_YeoJohnson(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+
+svm_model <- 
+  svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("classification")
+
+svm_wflow <- 
+  workflow() %>% 
+  add_model(svm_model) %>% 
+  add_recipe(svm_recipe)
+```
+
+The default parameter ranges for the two tuning parameters `cost` and `rbf_sigma` are:
+
+```{r}
+cost()
+
+rbf_sigma()
+```
+
+For illustration, let's slightly change the kernel parameter range to improve visualizations of the search:
+
+```{r}
+svm_param <- 
+  svm_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  update(rbf_sigma = rbf_sigma(c(-7, -1)))
+```
+
+# Bayesian Optimization
+

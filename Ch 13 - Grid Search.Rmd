@@ -1,0 +1,217 @@
+---
+title: 'Chapter 13: Grid Search'
+author: "Nick Jenkins"
+date: '2022-04-16'
+output: html_document
+---
+
+Grid search methods specify the possible values of the parameters *a priori*. 
+
+# Regular and Non-Regular Grids
+
+There are two types of grids. A regular grid combines each parameter factorially by using all combinations of the sets. Alternatively, a non-regular grid is one where the parameter combinations are not formed from a small set of points. 
+
+For example, in the multilayer perceptron model. the parameters marked for tuning are:
+
+* the number of hidden units
+
+* the number of fitting epochs/iterations in model training
+
+* the amount of weight decay penalization
+
+With **parsnip** the specification for a classification model fit using the **nnet** package is:
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+mlp_model <- 
+  mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>% 
+  set_engine("nnet", trace = 0) %>% 
+  set_mode("classification")
+```
+
+We extract the arguments with unknown values:
+
+```{r}
+mlp_param <- extract_parameter_set_dials(mlp_model)
+mlp_param %>% extract_parameter_dials("hidden_units")
+
+mlp_param %>% extract_parameter_dials("penalty")
+
+mlp_param %>% extract_parameter_dials("epochs")
+```
+
+## Regular Grids
+
+Regular grids are combinations of separate sets of parameter values. The user creates a distinct set of values for each parameter. This can be done with the `crossing()` function:
+
+```{r}
+crossing(
+  hidden_units = 1:3,
+  penalty = c(0.0, 0.1),
+  epochs = c(100, 200)
+)
+```
+
+The parameter object knows the ranges of the parameters. The **dials** package contains a set of `grid_*()` functions that take the parameter object as input to produce different types of grids:
+
+```{r}
+grid_regular(mlp_param, levels = 2)
+```
+
+`levels` is the number of levels per parameter to create. It can also take a named vector of values:
+
+```{r}
+mlp_param %>% 
+  grid_regular(levels = c(hidden_units = 3, penalty = 2, epochs = 2))
+```
+
+## Irregular Grids
+
+There are several ways to create non-regular grids. The first is to use random sampling across the range of parameters. The `grid_random()` function generates independent uniform random numbers across the parameter rangers. If the parameter object has an associated transformation, the random numbers are generated on the transformed scale. 
+
+```{r}
+set.seed(1301)
+mlp_param %>% 
+  grid_random(size = 1000) %>% # size is the number of combinations
+  summary()
+```
+
+# Evaluating the Grid
+
+You choose the best tuning parameter combination by using data that were not included in the training set. We will use a classification dataset as an example.
+
+```{r}
+data(cells)
+cells <- cells %>% select(-case)
+
+glimpse(cells)
+
+set.seed(1304)
+cell_folds <- vfold_cv(cells)
+```
+
+Because of the high degree of correlation between predictors, it makes sense to use PCA feature extraction to decorrelate the predictors. This recipie contains code to transform the predictors to increase symmetry, normalize them to be on the same scale, rain in extreme values with the Yeo Johnson transformation and conduct PCA:
+
+```{r}
+mlp_recipie <- 
+  recipe(class ~ ., data = cells) %>% 
+  step_YeoJohnson(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_pca(all_numeric_predictors(), num_comp = tune()) %>% 
+  step_normalize(all_numeric_predictors())
+
+mlp_wflow <- 
+  workflow() %>% 
+  add_model(mlp_model) %>% 
+  add_recipe(mlp_recipie)
+```
+
+Let's create a `mlp_param` object to adjust some of the default ranges. 
+
+```{r}
+mlp_param <- 
+  mlp_wflow %>% 
+  extract_parameter_set_dials() %>% 
+  update(epochs = epochs(c(50, 200)),
+         num_comp = num_comp(c(0, 40)))
+```
+
+The `tune_grid()` function is the primary function for conducting grid search. It has the following options:
+
+* `grid`: An integer or data frame. When an integer is used, the function creates a space-filling design with `grid` number of candidate parameter combinations. If specific parameter combinations exist, the `grid` parameter is used to pass them to the funciton. 
+
+* `param_info`: An oprional argument for defining the parameter ranges. 
+
+```{r}
+roc_res <- metric_set(roc_auc)
+
+set.seed(1305)
+mlp_reg_tune <- 
+  mlp_wflow %>% 
+  tune_grid(cell_folds,
+            grid = mlp_param %>% grid_regular(levels = 3),
+            metrics = roc_res)
+
+mlp_reg_tune
+```
+
+We can plot the results with `auto_plot()`:
+
+```{r}
+autoplot(mlp_reg_tune) +
+  scale_color_viridis_d(direction = -1) +
+  theme(legend.position = "top")
+```
+
+This shows that the amount of penalization has the largest impact on the area under the ROC curve. The number of epochs doesn't appear to have a pronounced effect on performance. The change in the number of hidden units appears to matter most when the amount of regularization is low (and harms performance). 
+
+```{r}
+show_best(mlp_reg_tune) %>% select(-.estimator)
+```
+
+Based on these results, it makes sense to conduct another grid search with larger values of the weight decay penalty. 
+
+To use a space-filling design, either the `grid` argument can be given an integer or one of the `grid_*()` functions can produce a dataframe. 
+
+```{r}
+set.seed(1306)
+mlp_sfd_tune <- 
+  mlp_wflow %>% 
+  tune_grid(cell_folds,
+            grid = 20,
+            param_info = mlp_param,
+            metrics = roc_res)
+mlp_sfd_tune
+
+autoplot(mlp_sfd_tune)
+
+show_best(mlp_sfd_tune)
+```
+
+# Finalizing the Model
+
+To fit a final model, a final set of parameter values must be determined. There are two methods to do so:
+
+* manually pick values that appear approprate
+* use a `select_*()` function
+
+`select_best()` will choose the parameters with the numerically best results. 
+
+```{r}
+best <- select_best(mlp_reg_tune, metric = "roc_auc")
+```
+
+No fit the final model:
+
+```{r}
+final_mlp_wflow <- 
+  mlp_wflow %>% 
+  finalize_workflow(best)
+final_mlp_wflow
+
+# and fit the entire training set
+final_mlp_fit <- 
+  final_mlp_wflow %>% 
+  fit(cells)
+```
+
+# Tools for Creating Tuning Specifications
+
+The **usemodels** package can take a data frame and a model formula, then write R code for tuning the model. The code also creates an appropriate recipe whose steps depend on the requested model as well as the predictor data. 
+
+```{r}
+library(usemodels)
+
+use_xgboost(Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type +
+              Latitude + Longitude,
+            data = ames_train,
+            verbose = TRUE)
+```
+
+# Tools for Efficient Grid Search
+
+## Submodel Optimization
+
+There are types of models where, from a single model fit, multiple tuning parameters can be evaluated without refitting. For example, PLS creates components that maximize the variation in the predictors (like PCA) but simultaneously tries to maximize the correlation between these predictors and the outcome. 

@@ -1,0 +1,165 @@
+---
+title: 'Chapter 12: Model Tuning and the Dangers of Overfitting'
+author: "Nick Jenkins"
+date: '2022-04-13'
+output: html_document
+---
+
+# Model Parameters
+
+The number of nearest neighbors is a good example of a tuning parameter or hyperparameter that cannot be directly estimated from the data. 
+
+# Tuning Parameters for Different Types of Models
+
+There are many examples of tuning parameter in different statistical and machine learning models:
+
+* Boosting is an ensemble method that combines a series of base models, each of which is created sequentially and depends on the previous models. The number of boosting iterations is an important tuning parameter that usually requires optimization. 
+
+* In the classic single-layer neural network the predictors are combined using two or more hidden units which are linear combinations of the predictors that are captured in an *activation function*. The hidden predictors are then connected to the outcome units; one outcome unit is for regression models and multiple outcome units are required for classification. The number of hidden units and the type of activation function are important structural tuning parameters. 
+
+* Modern gradient descent methods are improved by finding the right optimization parameters. 
+
+In some cases, preprocessing techniques require tuning:
+
+* In PCA, or partial least squares, the predictors are replaced with new, artificial features that have better properties related to collinearity. The number of extracted components can be tuned. 
+
+* Imputation methods estimate missing predictor values using the complete values of one or more predictors. One effective imputation tool uses *K*-nearest neighbors of the complete columns to predict the missing value. The number of neighbors is tuned. 
+
+Some classical statistical models also have structural parameters:
+
+* link functions (?)
+
+* 
+
+# What Do We Optimize
+
+In classical statistical models, we might want to optimize the link function by choosing the one that produces the lowest log-likelihood.
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+data("two_class_dat")
+
+set.seed(91)
+split <- initial_split(two_class_dat)
+
+training_set <- training(split)
+testing_set <- testing(split)
+
+llhood <- function(...) {
+  logistic_reg() %>% 
+    set_engine("glm", ...) %>% 
+    fit(Class ~ ., data = training_set) %>% 
+    glance() %>% 
+    select(logLik)
+}
+
+bind_rows(
+  llhood(family = binomial(link = "logit")),
+  llhood(family = binomial(link = "probit")),
+  llhood(family = binomial(link = "cloglog"))
+) %>% 
+  mutate(link = c("logit", "probit", "c-log-log")) %>% 
+  arrange(desc(logLik))
+```
+
+One way to improve this analysis is to resample the statistics and separate the modeling data from the data used for performance estimation. 
+
+```{r}
+set.seed(1201)
+rs <- vfold_cv(training_set, repeats = 10)
+
+lloss <- function(...) {
+  perf_meas <- metric_set(roc_auc, mn_log_loss)
+  
+  logistic_reg() %>% 
+    set_engine("glm", ...) %>% 
+    fit_resamples(Class ~ A + B, rs, metrics = perf_meas) %>% 
+    collect_metrics(summarize = FALSE) %>% 
+    select(id, id2, .metric, .estimate)
+}
+
+library(doMC)
+registerDoMC(cores = 4)
+
+resampled_res <- 
+  bind_rows(
+    lloss(family = binomial(link = "logit")) %>% mutate(model = "logistic"),
+    lloss(family = binomial(link = "probit")) %>% mutate(model = "probit"),
+    lloss(family = binomial(link = "cloglog")) %>%  mutate(model = "c-log-log")
+  ) %>% 
+  # convert log-loss to log-likelihood
+  mutate(.estimate = ifelse(.metric == "mn_log_loss", -.estimate, .estimate)) %>% 
+  group_by(model, .metric) %>% 
+  summarize(mean = mean(.estimate, na.rm = TRUE),
+            std_err = sd(.estimate, na.rm = TRUE) / sum(!is.na(.estimate)),
+            .groups = "drop")
+
+resampled_res %>% 
+  filter(.metric == "mn_log_loss") %>% 
+  ggplot(aes(x = mean, y = model)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = mean - 1.64 * std_err, xmax = mean + 1.64 * std_err),
+                width = 0.1)
+```
+
+# The Consequences of Poor Parameter Estimates
+
+# Two General Strategies for Optimization
+
+Tuning parameter optimization usually falls into one of two categories: grid search and iterative search.
+
+*Grid search* is when pre-define a set of parameter values to evaluate. The main choices involved in grid search are how to make the grid and how many parameter combinations to evaluate. Grid search is often judged as inefficient since the number of grid points required to cover the parameter space can grow unmagageable with the curse of dimensionality. 
+
+*Iterative search* or sequential search is when we sequentially discover new parameter combinations based on previous results. 
+
+# Tuning Parameters in Tidymodels
+
+It is possible to tune:
+
+* the threshold for combining neighborhoods into an "other" category (with argument name `threhold`)
+
+* the number of degrees of freedom in a natural spline (`deg_free`)
+
+* the number of data points required to execute a split in a tree-based model (`min_n`), and
+
+* the amount of regularization in penalized models (`penalty`)
+
+The **parsnip** model specifications, there are two kinds of parameter arguments. *Main arguments* are those that are most often optimized for performance and are available in multiple engines. 
+
+A secondary set of tuning parameters are *engine-specific*. These are either infrequently optimized or are only specific to certain engines. For example:
+
+```{r}
+rand_forest(trees = 2000, min_n = 10) %>% # main arguments
+  set_engine("ranger", regularization.factor = 0.5) # engine specific
+```
+
+Parameters are marked for tuning by assigning them a value of `tune()`. 
+
+```{r}
+neural_net_spec <- 
+  mlp(hidden_units = tune()) %>% 
+  set_engine("keras")
+```
+
+To enumerate the tuning parameter for an object, use the `extract_parameter_set_dials()` function:
+
+```{r}
+extract_parameter_set_dials(neural_net_spec)
+```
+
+There is an optional identification argument that associates a name with the parameters. This can come in handy when the same kind of parameter is being used in different places. For example, with the Ames housing data, the recipe encoded both longitude and latitude with spline functions. If we want to tune the two spline functions to potentially have different levels of smoothness, we call `step_ns()` twice, once for each predictor. 
+
+```{r}
+ames_res <- 
+  recipe(Slaes ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type +
+           Latitude + Longitude, data = ames_train) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>% 
+  step_other(Neighborhood, threshold = tune()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_interact(~ Gr_Liv_Area:starts_with("Bldg_Type_")) %>% 
+  step_ns(Longitude, deg_free = tune("longidute df")) %>% 
+  step_ns(Latitude, deg_free = tune("latitude df"))
+```
+
