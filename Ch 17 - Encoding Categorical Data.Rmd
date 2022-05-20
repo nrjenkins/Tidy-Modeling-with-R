@@ -1,0 +1,81 @@
+---
+title: 'Chapter 17: Encoding Categorical Data'
+author: "Nick Jenkins"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Some models require factors to be encoded as dummy variables. This can be problematic when there are too many categories or there are new categories at prediction time.
+
+# Is An Encoding Necessary?
+
+Using dummy variables instead of untransformed factor variables does not improve model performance, but it does increase the time needed to train a model. It is a good idea to use the untransformed versions when the model allows for it.
+
+# Encoding Ordinal Predictors
+
+To work with ordered factors, use recipe steps such as `step_unorder()` to convert to regular factors, and `step_ordinalscore()` which maps specific numeric values to each factor level.
+
+# Using the Outcome for Encoding Predictors
+
+There are other options for encodings than just dummy or indicator variables. One method called *effect* or *likelihood* encodings replaces the original variables with a single numeric column that measures the effect of those data. For example, for the neighborhood predictor in the Ames housing data, we can compute the mean of median sale price for each neighborhood and substitute these means for the original data values:
+
+```{r}
+library(tidymodels)
+data(ames)
+ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
+
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <-  testing(ames_split)
+
+ames_train %>% 
+  group_by(Neighborhood) %>% 
+  summarize(mean = mean(Sale_Price),
+            std_err = sd(Sale_Price) / sqrt(length(Sale_Price))) %>% 
+  ggplot(aes(y = reorder(Neighborhood, mean), x = mean)) +
+  geom_point() +
+  geom_errorbar(aes(xmin = mean - 1.64 * std_err, xmax = mean + 1.64 * std_err))
+```
+
+This works well when your categorical variable has many levels. The **embed** package has several recipe step functions for different kinds of effect encodings, such as `step_lencode_glm()`, `step_lencode_mixed()`, and `step_lencode_bayes()`. These steps use a generalized linear model to estimate the effect of each level in a categorical predictor on the outcome.
+
+```{r}
+library(embed)
+
+ames_glm <- 
+  recipe(Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+           Latitude + Longitude, data = ames_train) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>% 
+  step_lencode_glm(Neighborhood, outcome = vars(Sale_Price)) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_interact(~ Gr_Liv_Area:starts_with("Bldg_Type_")) %>% 
+  step_ns(Latitude, Longitude, deg_free = 20)
+
+ames_glm
+
+glm_estimates <- 
+  prep(ames_glm) %>% 
+  tidy(number = 2)
+
+glm_estimates
+```
+
+## Effect Encodings with Partial Pooling
+
+`step_lencode_mixed()` is used to adjust the estimates so that levels with small sample sizes are shrunken toward the overall mean.
+
+# Feature Hashing
+
+Feature hashing methods also create dummy variables, but only consider the value of the category to assign it to a predefined pool of dummy variables.
+
+```{r}
+library(rlang)
+
+ames_hashed <- 
+  ames_train %>% 
+  mutate(hash = map_chr(Neighborhood, hash))
+
+ames_hashed %>% 
+  select(Neighborhood, hash)
+```

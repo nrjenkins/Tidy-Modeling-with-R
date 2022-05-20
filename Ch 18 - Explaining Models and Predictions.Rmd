@@ -1,0 +1,231 @@
+---
+title: "Chapter 18: Explaining Models and Predictions"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+Model explainer algorithms can be use to generate an understanding of predictions. There are two types of model explanations. Global and local. Global model explanations provide an overall understanding aggregated over a whole set of observations; local model explanations provide information about a prediction for a single observation.
+
+# Software for Model Explanations
+
+Let's build model-agnostic explainers for both of these models to find out why they make the predictions they do.
+
+```{r}
+library(pacman)
+p_load(tidyverse, tidymodels, DALEXtra)
+
+data(ames)
+ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
+
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <-  testing(ames_split)
+
+ames_rec <- 
+  recipe(Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+           Latitude + Longitude, data = ames_train) %>%
+  step_log(Gr_Liv_Area, base = 10) %>% 
+  step_other(Neighborhood, threshold = 0.01) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_interact( ~ Gr_Liv_Area:starts_with("Bldg_Type_") ) %>% 
+  step_ns(Latitude, Longitude, deg_free = 20)
+
+lm_model <- linear_reg() %>% set_engine("lm")
+
+lm_wflow <- 
+  workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(ames_rec)
+
+lm_fit <- fit(lm_wflow, ames_train)
+
+rf_model <- 
+  rand_forest(trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rf_wflow <- 
+  workflow() %>% 
+  add_formula(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type + 
+      Latitude + Longitude) %>% 
+  add_model(rf_model)
+
+rf_fit <- fit(rf_wflow, ames_train)
+
+vip_features <- c("Neighborhood", "Gr_Liv_Area", "Year_Built",
+                  "Bldg_Type", "Latitude", "Longitude")
+
+vip_train <- 
+  ames_train %>% 
+  select(all_of(vip_features))
+
+explainer_lm <- 
+  explain_tidymodels(
+    lm_fit,
+    data = vip_train,
+    y = ames_train$Sale_Price,
+    label = "lm + interactions",
+    verbose = FALSE
+  )
+explainer_lm
+
+explainer_rf <- 
+  explain_tidymodels(
+    rf_fit,
+    data = vip_train,
+    y = ames_train$Sale_Price,
+    label = "random forest",
+    verbose = FALSE
+  )
+explainer_rf
+```
+
+We can quantify global or local model explanations either in terms of:
+
+-   original, basic predictors as they existed without significant feature engineering transformations,
+
+-   derived functions, such as those created via dimensionality reduction or iterations and spline terms, as in this example
+
+# Local Explanations
+
+Local model explanations provide information about a prediction for a single observation. For example, let's consider an older duplex in the North Ames neighborhood:
+
+```{r}
+duplex <- vip_train[120, ]
+duplex
+```
+
+One approach for understanding why a model predicts a given price is called a "break-down" explanation. It computes how contributions attributed to individual features change the mean model's prediction for a particular observation, like our duplex.
+
+```{r}
+lm_breakdown <- predict_parts(explainer = explainer_lm, new_observation = duplex)
+lm_breakdown
+```
+
+Size, duplex status, longitude, and age all contribute the most to the price being driven down from the intercept.
+
+```{r}
+rf_breakdown <- predict_parts(explainer = explainer_rf, new_observation = duplex)
+rf_breakdown
+```
+
+Size, age, and duplex status are most important for the random forest model.
+
+Shapley Additive Explanations are where the average contributions of features are computed under different combinations of "coalitions" of feature orderings.
+
+```{r}
+set.seed(1801)
+shap_duplex <- 
+  predict_parts(explainer = explainer_rf,
+                new_observation = duplex,
+                type = "shap",
+                B = 20)
+
+plot(shap_duplex)
+
+library(forcats)
+shap_duplex %>% 
+  group_by(variable) %>% 
+  mutate(mean_val = mean(contribution)) %>% 
+  ungroup() %>% 
+  mutate(variable = fct_reorder(variable, abs(mean_val))) %>% 
+  ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+  geom_col(data = ~ distinct(., variable, mean_val),
+           aes(mean_val, variable), alpha = 0.5) +
+  geom_boxplot(width = 0.5)
+```
+
+The box plots show the distribution of contributions across all the orderings we tried, and the bars show the average attribution for each feature.
+
+What about a different observation in our data set? Let's look at a larger, newer one-family home in the Gilbert neighborhood.
+
+```{r}
+big_house <- vip_train[1269, ]
+big_house
+
+set.seed(1802)
+shap_house <- 
+  predict_parts(explainer = explainer_rf,
+                new_observation = big_house,
+                type = "shap",
+                B = 20)
+
+shap_house %>% 
+  group_by(variable) %>% 
+  mutate(mean_val = mean(contribution)) %>% 
+  ungroup() %>% 
+  mutate(variable = fct_reorder(variable, abs(mean_val))) %>% 
+  ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+  geom_col(data = ~ distinct(., variable, mean_val),
+           aes(mean_val, variable), alpha = 0.5) +
+  geom_boxplot(width = 0.5)
+```
+
+# Global Explanations
+
+Global model explanations help us understand which features are most important in driving the predictions of the linear and random forest models overall, aggregated over the whole training set. While the previous section addressed what variables or features are most important in predicting sale price for an individual home, global feature importance addresses what variables are most important for a model in aggregate.
+
+```{r}
+set.seed(1803)
+vip_lm <- model_parts(explainer_lm, loss_function = loss_root_mean_square)
+
+set.seed(1804)
+vip_rf <- model_parts(explainer_rf, loss_function = loss_root_mean_square())
+
+ggplot_imp <- function(...) {
+  obj <- list(...)
+  metric_name <- attr(obj[[1]], "loss_name")
+  metric_lab <- paste(metric_name, 
+                      "after permutations\n(higher indicates more important)")
+  
+  full_vip <- bind_rows(obj) %>%
+    filter(variable != "_baseline_")
+  
+  perm_vals <- full_vip %>% 
+    filter(variable == "_full_model_") %>% 
+    group_by(label) %>% 
+    summarise(dropout_loss = mean(dropout_loss))
+  
+  p <- full_vip %>%
+    filter(variable != "_full_model_") %>% 
+    mutate(variable = fct_reorder(variable, dropout_loss)) %>%
+    ggplot(aes(dropout_loss, variable)) 
+  if(length(obj) > 1) {
+    p <- p + 
+      facet_wrap(vars(label)) +
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss, color = label),
+                 size = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(aes(color = label, fill = label), alpha = 0.2)
+  } else {
+    p <- p + 
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss),
+                 size = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(fill = "#91CBD765", alpha = 0.4)
+    
+  }
+  p +
+    theme(legend.position = "none") +
+    labs(x = metric_lab, 
+         y = NULL,  fill = NULL,  color = NULL)
+}
+
+ggplot_imp(vip_lm)
+
+ggplot_imp(vip_rf)
+```
+
+# Building Global Explanations From Local Explanations
+
+With *partial dependence profiles* we can build global model explanations by aggregating local model explanations. Partial dependence profiles show how the expected value of a model prediction, like the predicted price of a home in Ames, changes as a function of a feature, like the age or gross living area.
+
+One way to build such a profile is by aggregating or averaging profiles for individual observations. A profile showing how an individual observation's prediction changes as a function of a given feature is called an ICE (individual conditional expectation) profile or a CP (ceteris paribus) profile.
+
+```{r}
+set.seed(1805)
+pdp_age <- model_profile(explainer_rf, N = 500, variables = "Year_Built")
+```
+
+# Back to Beans!

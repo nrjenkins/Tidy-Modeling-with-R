@@ -1,0 +1,224 @@
+---
+title: 'Chapter 21: Inferential Analysis'
+author: "Nick Jenkins"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Inference for Count Data
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+data("bioChemists", package = "pscl")
+
+ggplot(bioChemists, aes(x = art)) +
+  geom_histogram(binwidth = 1, color = "white")
+```
+
+# Comparisons with Two-Sample Tests
+
+Is there a difference in publications between men and women?
+
+```{r}
+bioChemists %>% 
+  group_by(fem) %>% 
+  summarize(counts = sum(art), n = length(art))
+```
+
+The simplest test is a two-sample comparison using the `poisson.test()` function:
+
+```{r}
+poisson.test(c(910, 916), T = 3) %>% 
+  tidy()
+```
+
+The `infer` package provides useful tools for hypothesis testing. First, we `specify()` that we will use the difference in the mean number of articles between the sexes and then `calculate()` the statistic from the data.
+
+```{r}
+library(infer)
+
+observed <- 
+  bioChemists %>%
+  specify(art ~ fem) %>%
+  calculate(stat = "diff in means", order = c("Men", "Women"))
+
+observed
+```
+
+Now we compute the confidence interval for this mean by creating the bootstrap distribution via `generate()`:
+
+```{r}
+set.seed(2101)
+bootstrapped <- 
+  bioChemists %>% 
+  specify(art ~ fem) %>% 
+  generate(reps = 2000, type = "bootstrap") %>% 
+  calculate(stat = "diff in means", order = c("Men", "Women"))
+
+bootstrapped
+```
+
+A percentile interval is calculated using:
+
+```{r}
+percentile_ci <- get_ci(bootstrapped)
+percentile_ci
+```
+
+We can also visualize the results:
+
+```{r}
+visualize(bootstrapped) +
+  shade_confidence_interval(endpoints = percentile_ci)
+```
+
+If we need a p-value, we add a `hpyothesis()` to the chain:
+
+```{r}
+set.seed(2102)
+
+permuted <- 
+  bioChemists %>% 
+  specify(art ~ fem) %>% 
+  hypothesize(null = "independence") %>% 
+  generate(reps = 2000, type = "permute") %>% 
+  calculate(stat = "diff in means", order = c("Men", "Women"))
+permuted
+```
+
+And we visualize it like this:
+
+```{r}
+visualize(permuted) + 
+  shade_p_value(obs_stat = observed, direction = "two_sided")
+```
+
+The actual p-value is:
+
+```{r}
+permuted %>% 
+  get_p_value(obs_stat = observed, direction = "two-sided")
+```
+
+# Log-Linear Models
+
+```{r}
+library(poissonreg)
+
+log_lin_spec <- poisson_reg()
+
+log_lin_fit <- 
+  log_lin_spec %>% 
+  fit(art ~ ., data = bioChemists)
+
+tidy(log_lin_fit, conf.int = TRUE)
+```
+
+We can compute the bootstrapped confidence intervals with `rsample`:
+
+```{r}
+set.seed(2103)
+glm_boot <- 
+  reg_intervals(art ~ ., data = bioChemists, model_fn = "glm", family = poisson)
+
+glm_boot
+```
+
+Let's fit a smaller model without `phd`:
+
+```{r}
+log_lin_reduced <- 
+  log_lin_spec %>% 
+  fit(art ~ ment + kid5 + fem + mar, data = bioChemists)
+
+anova(
+  extract_fit_engine(log_lin_reduced),
+  extract_fit_engine(log_lin_fit),
+  test = "LRT"
+) %>% 
+  tidy()
+```
+
+# A More Complex Model
+
+We can also fit a zero-inflated Poisson model.
+
+```{r}
+zero_inflated_spec <- 
+  poisson_reg() %>% 
+  set_engine("zeroinfl")
+
+zero_inflated_fit <- 
+  zero_inflated_spec %>% 
+  fit(art ~ fem + mar + kid5 + ment | fem + mar + kid5 + phd + ment,
+      data = bioChemists)
+
+tidy(zero_inflated_fit)
+
+zero_inflated_fit %>% 
+  extract_fit_engine() %>% 
+  summary()
+
+extract_fit_engine(zero_inflated_fit) %>% AIC()
+extract_fit_engine(log_lin_fit) %>% AIC()
+```
+
+These results show that the ZIP model is preferable. But we need more information. We are going to compute the AIC values for a large number of resamples and determine how often the results favor the ZIP model.
+
+```{r}
+zip_form <- art ~ fem + mar + kid5 + ment | fem + mar + kid5 + phd + ment
+glm_form <- art ~ fem + mar + kid5 + ment
+
+set.seed(2104)
+bootstrap_models <- 
+  bootstraps(bioChemists, times = 2000, apparent = TRUE) %>% 
+  mutate(glm = map(splits, ~ fit(log_lin_spec, glm_form, data = analysis(.x))),
+         zip = map(splits, ~ fit(zero_inflated_spec, zip_form, data = analysis(.x))))
+
+bootstrap_models
+```
+
+Now we can extract the model fits and their corresponding AIC values:
+
+```{r}
+bootstrap_models <- 
+  bootstrap_models %>% 
+  mutate(glm_aic = map_dbl(glm, ~ extract_fit_engine(.x) %>% AIC()),
+         zip_aic = map_dbl(zip, ~ extract_fit_engine(.x) %>% AIC()))
+
+mean(bootstrap_models$zip_aic < bootstrap_models$glm_aic)
+```
+
+This shows that using the ZIP model is a good idea.
+
+Now let's make bootstrap intervals for the zero probability model.
+
+```{r}
+bootstrap_models <- 
+  bootstrap_models %>% 
+  mutate(zero_coefs = map(zip, ~ tidy(.x, type = "zero")))
+
+bootstrap_models$zero_coefs[[1]]
+```
+
+It's a good idea to visualize the boot strap distributions of the coefficients:
+
+```{r}
+bootstrap_models %>% 
+  unnest(zero_coefs) %>% 
+  ggplot(aes(x = estimate)) +
+  geom_histogram(bins = 25, color = "white") +
+  facet_wrap(~ term, scales = "free_x") +
+  geom_vline(xintercept = 0)
+```
+
+We can compute the percentile intervals too:
+
+```{r}
+bootstrap_models %>% int_pctl(zero_coefs)
+
+# t-distribution intervals
+bootstrap_models %>% int_t(zero_coefs)
+```

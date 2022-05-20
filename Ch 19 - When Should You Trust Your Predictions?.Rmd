@@ -1,0 +1,69 @@
+---
+title: 'Chapter 19: When Should You Trust Your Predictions?'
+author: "Nick Jenkins"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+*Equivocal zones* use the predicted values to alert the user that the results may be suspect. *Applicability* uses the predictors to measure the amount of extrapolation for new samples.
+
+# Equivocal Results
+
+In a health context, an equivocal zone is a range of results where the prediction should not be reported to patients.
+
+```{r}
+library(tidymodels)
+tidymodels_prefer()
+
+simulate_two_classes <- 
+  function (n, error = 0.1, eqn = quote(-1 - 2 * x - 0.2 * x^2 + 2 * y^2))  {
+    # Slightly correlated predictors
+    sigma <- matrix(c(1, 0.7, 0.7, 1), nrow = 2, ncol = 2)
+    dat <- MASS::mvrnorm(n = n, mu = c(0, 0), Sigma = sigma)
+    colnames(dat) <- c("x", "y")
+    cls <- paste0("class_", 1:2)
+    dat <- 
+      as_tibble(dat) %>% 
+      mutate(
+        linear_pred = !!eqn,
+        # Add some misclassification noise
+        linear_pred = linear_pred + rnorm(n, sd = error),
+        prob = binomial()$linkinv(linear_pred),
+        class = ifelse(prob > runif(n), cls[1], cls[2]),
+        class = factor(class, levels = cls)
+      )
+    dplyr::select(dat, x, y, class)
+  }
+
+set.seed(1901)
+training_set <- simulate_two_classes(200)
+testing_set  <- simulate_two_classes(50)
+```
+
+We estimate a logistic regression using Bayesian methods:
+
+```{r}
+two_class_mod <- 
+  logistic_reg() %>% 
+  set_engine("stan", seed = 1902) %>% 
+  fit(class ~ . + I(x^2) + I(y^2), data = training_set)
+
+broom.mixed::tidy(two_class_mod)
+
+test_pred <- augment(two_class_mod, testing_set)
+test_pred %>% head()
+
+library(probably)
+lvls <- levels(training_set$class)
+
+test_pred <- 
+  test_pred %>% 
+  mutate(.pred_with_eqz = make_two_class_pred(.pred_class_1, lvls, 
+         buffer = 0.15))
+
+test_pred %>% count(.pred_with_eqz)
+```
+
+# Determining Model Applicability
+
+The idea is to accompany a prediction with a score that measures how similar the new point is to the training set.

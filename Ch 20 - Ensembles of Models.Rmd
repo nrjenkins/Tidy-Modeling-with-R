@@ -1,0 +1,237 @@
+---
+title: 'Chapter 20: Ensembles of Models'
+author: "Nick Jenkins"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Model stacking combines the predictions for multiple models of any type. For example, a logistic regression, classification tree, and support vector machine can be included in a stacking ensemble.
+
+The process of building a stacked ensemble is:
+
+1.  Assemble the training set of hold-out prediction
+2.  Create a model to blend these predictions
+3.  For each member of the ensemble, fit the model on the original training set
+
+# Creating the Training Set for Stacking
+
+For each data point in the training set, stacking requires an out-of-sample prediction of some sort. For regression models, this is the predicted outcome. For classification models, the predicted classes or probabilities are available for use. For a set of models, a data set is assembled where rows are the training set samples and columns are the out-of-sample predictions from the set of multiple models.
+
+To start ensembling with the `stacks` package, create an empty data stack using the `stacks()` function and then add candidate models.
+
+```{r setup}
+library(tidymodels)
+tidymodels_prefer()
+
+data("concrete", package = "modeldata")
+glimpse(concrete)
+
+# find the mean compressive strength per concrete mixture
+concrete <- 
+  concrete %>% 
+  group_by(across(-compressive_strength)) %>% 
+  summarize(compressive_strength = mean(compressive_strength),
+            .groups = "drop")
+
+set.seed(1501)
+concrete_split <- initial_split(concrete, strata = compressive_strength)
+concrete_train <- training(concrete_split)
+concrete_test <- testing(concrete_split)
+
+set.seed(1502)
+concrete_folds <- 
+  vfold_cv(concrete_train, strata = compressive_strength, repeats = 5)
+
+normalized_recipe <- 
+  recipe(compressive_strength ~ ., data = concrete_train) %>% 
+  step_normalize(all_predictors())
+
+poly_recipe <- 
+  normalized_recipe %>% 
+  step_poly(all_predictors()) %>% 
+  step_interact(~ all_predictors():all_predictors())
+
+library(rules)
+library(baguette)
+
+linear_reg_model <- 
+  linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet")
+
+nnet_model <- 
+  mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>% 
+  set_engine("nnet", MaxMWts = 2600) %>% 
+  set_mode("regression")
+
+nnet_param <- 
+  nnet_model %>% 
+  extract_parameter_set_dials() %>% 
+  update(hidden_units = hidden_units(c(1, 27)))
+
+mars_model <- 
+  mars(prod_degree = tune()) %>% 
+  set_engine("earth") %>% 
+  set_mode("regression")
+
+svm_r_model <- 
+  svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("regression")
+
+svm_p_model <- 
+  svm_poly(cost = tune(), degree = tune()) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("regression")
+
+knn_model <- 
+  nearest_neighbor(neighbors = tune(), dist_power = tune(), weight_func = tune()) %>% 
+  set_engine("kknn") %>% 
+  set_mode("regression")
+
+cart_model <- 
+  decision_tree(cost_complexity = tune(), min_n = tune()) %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+bag_cart_spec <- 
+  bag_tree() %>% 
+  set_engine("rpart", times = 50L) %>% 
+  set_mode("regression")
+
+rf_model <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+xgb_model <- 
+  boost_tree(tree_depth = tune(), learn_rate = tune(), loss_reduction = tune(),
+             min_n = tune(), sample_size = tune(), trees = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+cubist_model <- 
+  cubist_rules(committees = tune(), neighbors = tune()) %>% 
+  set_engine("Cubist")
+
+normalized <- 
+  workflow_set(preproc = list(normalized = normalized_recipe),
+               models = list(svm_radial = svm_r_model, 
+                             svm_poly = svm_p_model,
+                             knn = knn_model,
+                             neural_network = nnet_model))
+
+model_vars <- 
+  workflow_variables(outcomes = compressive_strength,
+                     predictors = everything())
+
+no_pre_proc <- 
+  workflow_set(preproc = list(simple = model_vars),
+               models = list(mars = mars_model,
+                             cart = cart_model,
+                             cart_bagged = bag_cart_spec,
+                             rf = rf_model,
+                             boosting = xgb_model,
+                             cubist = cubist_model))
+
+with_features <- 
+  workflow_set(preproc = list(full_qud = poly_recipe),
+               models = list(linear_reg = linear_reg_model,
+                             knn = knn_model))
+
+all_workflows <- 
+  bind_rows(no_pre_proc, normalized, with_features) %>% 
+  # make the workflow ID's a little more simple:
+  mutate(wflow_id = gsub("(simple_)|(normalized_)", "", wflow_id))
+
+library(doMC)
+registerDoSEQ()
+
+grid_ctrl <- 
+  control_grid(save_pred = TRUE,
+               parallel_over = "everything",
+               save_workflow = TRUE)
+
+grid_results <- 
+  all_workflows %>% 
+  workflow_map(seed = 1503,
+               resamples = concrete_folds,
+               grid = 25, 
+               control = grid_ctrl)
+
+library(finetune)
+
+race_ctrl <- 
+  control_race(save_pred = TRUE,
+               parallel_over = "everything",
+               save_workflow = TRUE)
+
+race_results <- 
+  all_workflows %>% 
+  workflow_map("tune_race_anova",
+               seed = 1503,
+               resamples = concrete_folds,
+               grid = 25, 
+               control = race_ctrl)
+```
+
+To start ensembling with the **stacks** package, we create an empty data stack using the `stacks()` function and then add candidate models.
+
+```{r}
+library(stacks)
+
+concrete_stack <- 
+  stacks() %>% 
+  add_candidates(race_results)
+
+concrete_stack
+```
+
+# Blend the Predictions
+
+The training set predictions and the corresponding observed data are used to create a *meta-learning model* where the assessment set predictions are the predictors of the observed outcome data. The most commonly used model is a regularized generalized linear model, which encompasses linear, logistic, and multinomial models. The regularization occurs via lasso and has many advantages:
+
+-   Using the lasso penalty can remove candidates (and sometimes whole model types) from the ensemble
+
+-   The correlation between ensemble candidates tends to be very high and regularization helps alleviate this issue
+
+```{r}
+set.seed(2001)
+ens <- blend_predictions(concrete_stack)
+ens
+
+autoplot(ens)
+```
+
+To evaluate the meta-learning model with larger penalties, let's pass an additional option:
+
+```{r}
+set.seed(2002)
+ens <- blend_predictions(concrete_stack, penalty = 10^seq(-2, -0.5, length = 20))
+ens
+
+autoplot(ens)
+
+autoplot(ens, "weights") +
+  geom_text(aes(x = weight + 0.01, label = model), hjust = 0)
+```
+
+# Fit the Member Models
+
+To be able to use the stacking model, seven additional model fits are required. These use the entire training set with the original predictors.
+
+```{r}
+ens <- fit_members(ens)
+```
+
+# Test Set Results
+
+```{r}
+reg_metrics <- metric_set(rmse, rsq)
+
+ens_test_pred <- 
+  predict(ens, concrete_test) %>% 
+  bind_cols(concrete_test)
+
+ens_test_pred %>% 
+  reg_metrics(compressive_strength, .pred)
+```
